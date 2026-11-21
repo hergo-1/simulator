@@ -13,10 +13,9 @@
 //        [--stills beats [--timeline f.json]]       (one tile per timeline beat, +0.3 s so motion settles)
 //        [--stills every:0.2 --from 3 --to 5]       (scrub a transition)
 //
-//   <name> is a sim built into simulator-out/dist, or a path to any .html
-//   that exposes window.seek(seconds) and freezes its clock on ?render
-//   (motion-effects, vox-explainer, milestone-reveal, model-showdown). An .html
-//   needs --to <seconds> unless it sets window.DURATION.
+//   <name> is a sim built into simulator-out/dist by sims/build.mjs.
+//   HARDENED (see SECURITY.md): arbitrary external .html paths are refused — capture executes
+//   the page's JavaScript in Chromium, so only pages this repo built itself may be captured.
 import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,14 +32,20 @@ const opt = (k, d) => {
   return i === -1 ? d : argv[i + 1];
 };
 if (!name) {
-  console.error('usage: node sims/capture.mjs <name|file.html> [--config f.json] [--out f.mp4] [--music f.wav]');
+  console.error('usage: node sims/capture.mjs <name> [--config f.json] [--out f.mp4] [--music f.wav]');
   process.exit(1);
 }
-const SEEK = name.endsWith('.html');
-const html = SEEK ? path.resolve(name) : path.join(DIST, `${name}.html`);
-const label = SEEK ? path.basename(name, '.html') : name;
+// Hardened: capture only accepts a plain sim name whose page was built into DIST by
+// sims/build.mjs. A path (anything with a separator, or ending in .html) is refused outright.
+if (name.endsWith('.html') || name.includes('/') || name.includes('\\') || !/^[A-Za-z0-9_-]+$/.test(name)) {
+  console.error(`refused: "${name}" is not a plain sim name. This hardened copy captures only sims it built into simulator-out/dist (see SECURITY.md).`);
+  process.exit(1);
+}
+const SEEK = false;
+const html = path.join(DIST, `${name}.html`);
+const label = name;
 if (!fs.existsSync(html)) {
-  console.error(SEEK ? `missing ${html}` : `missing ${html}; run node sims/build.mjs ${name}`);
+  console.error(`missing ${html}; run node sims/build.mjs ${name}`);
   process.exit(1);
 }
 const [W, H] = opt('size', '1080x1350').split('x').map(Number);

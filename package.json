@@ -5,7 +5,7 @@
   "description": "A Claude Code skill that rebuilds any industry as a live simulator in the format of a proven reference video: toy-scale models built by subagents, a product UI over the map, one camera, recorded to 60 fps video.",
   "license": "MIT",
   "scripts": {
-    "setup": "npm install && npx playwright install chromium",
+    "setup": "npm ci --ignore-scripts",
     "build": "node sims/build.mjs"
   },
   "dependencies": {

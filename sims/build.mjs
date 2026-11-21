@@ -4,9 +4,11 @@
 // works offline, can be published as-is.
 //
 //   node sims/build.mjs                 every example in sims/
-//   node sims/build.mjs v8-live         one example
-//   node sims/build.mjs ./my-machine    your own sim: any folder with a main.js. Import the kit as
-//                                       'simulator-kit/runtime.js', 'simulator-kit/util.js' and so on.
+//   node sims/build.mjs warehouse-film  one example
+//
+// HARDENED (see SECURITY.md): only named entries that live inside sims/ can be built. External
+// folders are rejected — bundling runs the entry's code through esbuild plugins, so an outside
+// folder would be arbitrary code from disk. Put a new sim in sims/<name>/ first, then build it by name.
 //
 // An entry may carry build.json with {"swap": {"heavy.glb": "light.glb"}}: every import of a file named heavy.glb is
 // served from light.glb in the same folder (a site page with lighter models than its film). {"external": {...}} does
@@ -43,7 +45,7 @@ const names = process.argv.slice(2).length
       .readdirSync(HERE)
       .filter((d) => fs.existsSync(path.join(HERE, d, 'main.js')));
 
-// `simulator-kit/x.js` resolves to sims/kit/x.js, so a sim outside this folder can use the kit.
+// `simulator-kit/x.js` resolves to sims/kit/x.js for the entries inside sims/.
 const kitPlugin = {
   name: 'simulator-kit',
   setup(b) {
@@ -52,7 +54,12 @@ const kitPlugin = {
 };
 
 for (const arg of names) {
-  const dir = fs.existsSync(path.join(HERE, arg, 'main.js')) ? path.join(HERE, arg) : path.resolve(arg);
+  // Hardened: a build target is a plain entry name inside sims/ only — no paths, no external folders.
+  if (!/^[A-Za-z0-9_-]+$/.test(arg)) {
+    console.error(`refused: "${arg}" is not a plain sim name. Only entries inside sims/ can be built in this hardened copy (see SECURITY.md).`);
+    process.exit(1);
+  }
+  const dir = path.join(HERE, arg);
   if (!fs.existsSync(path.join(dir, 'main.js'))) {
     console.error(`no main.js in ${dir}`);
     process.exit(1);
@@ -100,7 +107,7 @@ for (const arg of names) {
     bundle: true,
     nodePaths: [DEPS],
     format: 'esm',
-    minify: !process.env.SIMS_DEBUG,
+    minify: true, // hardened: build behaviour is fixed, not environment-controlled (see SECURITY.md)
     write: false,
     target: 'es2022',
     legalComments: 'none',

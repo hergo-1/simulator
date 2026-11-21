@@ -43,18 +43,20 @@ records the page frame by frame into a 60 fps film with a sound on every action.
 
 ## Install
 
-```
-npx skills add Nyxera0x/simulator -g -a claude-code
-```
-
-Then, once, in the installed folder:
+This is a hardened fork of [Nyxera0x/simulator](https://github.com/Nyxera0x/simulator) — see
+[`SECURITY.md`](SECURITY.md) for every difference and why. Clone this fork, then, once, in the
+installed folder:
 
 ```
-npm install && npx playwright install chromium
+npm ci --ignore-scripts
 ```
 
-Node.js 20 or newer. `ffmpeg` for the video, Python 3 for the sound. An ElevenLabs key is optional: without it the
-films get a calm code bed under their action sounds.
+Dependencies install exactly from the committed `package-lock.json`, with install scripts
+disabled, and there is no browser download: capture uses the system Chromium.
+
+Node.js 20 or newer. `ffmpeg` for the video, Python 3 for the sound. There are no API keys and no
+downloads: the films get a calm procedural code bed under their action sounds, or a music file
+you supply yourself.
 
 ## Use
 
@@ -85,7 +87,7 @@ node sims/capture.mjs warehouse-film --size 1600x900 --dpr 1.2 --out simulator-o
    for the site switch.
 5. **Sweep for collisions.** Every 0.1 s, oriented boxes from each body's own geometry. Fix the paths until it
    reports nothing.
-6. **Score it and render it.** Sounds on the same timetable, real CC0 ambience, 60 fps frame by frame.
+6. **Score it and render it.** Sounds on the same timetable, synthesised locally, 60 fps frame by frame.
 
 ## What is inside
 
@@ -100,7 +102,7 @@ node sims/capture.mjs warehouse-film --size 1600x900 --dpr 1.2 --out simulator-o
 | `sims/*-film/` | Each film's entry point and timeline. |
 | `sims/*-collide/` | Each system's collision sweep. |
 | `sims/build.mjs`, `sims/capture.mjs` | Bundle a system into one HTML file; render it to a 60 fps mp4 or review sheets. |
-| `sfx/`, `run_sfx.py`, `tools/` | Procedural sound on the timeline, the final mix with music and ambience, CC0 recordings from Openverse. |
+| `sfx/`, `run_sfx.py`, `tools/` | Procedural sound on the timeline (local synthesis only, nothing downloaded), and the final mix with a supplied music file or the score's own bed. |
 
 ## License
 

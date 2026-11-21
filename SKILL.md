@@ -12,12 +12,17 @@ apart, write its rules down, and rebuild your system to those rules. Every model
 
 ## First run
 
+This is the hardened copy (see `SECURITY.md`). Run it only in an isolated environment, never on a
+machine holding projects or credentials.
+
 ```
-cd "$SKILL_DIR" && npm install && npx playwright install chromium
+cd "$SKILL_DIR" && npm ci --ignore-scripts
 ```
 
-The video needs `ffmpeg` on PATH and the sound needs Python 3 (standard library; `requests` only for ElevenLabs).
-Set `FFMPEG`, `PYTHON` or `CHROMIUM` to use other binaries.
+Dependencies install exactly from the committed `package-lock.json`, with install scripts disabled.
+There is no Playwright browser download: capture uses the system Chromium (`/usr/bin/chromium`)
+via the fixed path in `paths.mjs`. The video needs `ffmpeg` on PATH and the sound needs Python 3
+(standard library only). Binary paths are fixed in `paths.mjs` and are not read from the environment.
 
 ## The example: Rampline, a toy airport
 
@@ -104,11 +109,13 @@ the frames, not the work. Choose systems whose action happens on the ground, or 
 ```
 node sims/capture.mjs airport-film --size 1600x900 --dpr 1.2 --out simulator-out/airport-film.mp4
 python run_sfx.py sims/airport-shared/score.py --out simulator-out/fx.wav               # the action sounds alone, to check
-python tools/sfx_fetch.py "airport ambience" --n 4 --max-dur 60                           # real CC0 recordings, with credits
-python tools/music.py --film simulator-out/airport-film.mp4 --score sims/airport-shared/score.py     --plan docs/music_plan.json --ambience simulator-out/sfx/<the file you picked>.wav --out simulator-out/airport-final.mp4
+python tools/music.py --film simulator-out/airport-film.mp4 --score sims/airport-shared/score.py --out simulator-out/airport-final.mp4
 ```
 
-`docs/music_plan.json` is the ElevenLabs composition plan the airport used: 6 sections cut to the film's beats. With no
-`ELEVENLABS_API_KEY` the mix carries the action sounds and the ambience only.
+Sound is local and procedural only: the `sfx/` kit synthesises every sound, and `tools/music.py`
+mixes in either a music file you supply with `--music` or the score's own coded bed. This hardened
+copy downloads nothing and reads no API keys — the upstream online music generation and the
+sound-download tool were removed (see `SECURITY.md`). Any ambience is a local file you provide
+yourself with `--ambience`.
 
 Master to -14 LUFS. Check the music for gaps with `silencedetect` before mixing.

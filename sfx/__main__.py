@@ -46,7 +46,7 @@ def main():
     # A relative TIMELINE in the cue sheet is read next to the cue sheet, so it runs from any folder.
     timeline = args.timeline or os.path.join(os.path.dirname(os.path.abspath(args.cues)), getattr(cues, "TIMELINE", "timeline.json"))
     stem = os.path.splitext(os.path.basename(args.cues))[0]
-    out = args.out or getattr(cues, "OUT", os.path.join(os.environ.get("SIMULATOR_OUT", "simulator-out"), f"{stem}.wav"))
+    out = args.out or getattr(cues, "OUT", os.path.join("simulator-out", f"{stem}.wav"))  # hardened: fixed output folder, never from the environment
     with open(timeline, encoding="utf8") as f:
         tl = json.load(f)
 

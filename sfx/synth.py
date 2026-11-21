@@ -14,7 +14,7 @@ import random
 import subprocess
 
 SR = 48000
-FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
+FFMPEG = "ffmpeg"  # hardened: fixed binary name, never taken from the environment (see SECURITY.md)
 SAMPLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples")
 
 
