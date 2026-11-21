@@ -296,6 +296,12 @@ export function buildLiveWorld() {
     }
     return best;
   };
+  // every car on the line right now, oldest first — the interactive view picks from these
+  const activeCars = (t) =>
+    activeNs(t).map((n) => {
+      const slot = slotOf(n);
+      return {n, lt: t - n * TAKT, slot, group: cars[slot].body.group, vin: cars[slot].vin};
+    });
   const startedCount = (t) => Math.max(0, Math.floor(t / TAKT) - FIRST_N + 1);
   const shippedCount = (t) => Math.max(0, Math.floor((t - T.out[1]) / TAKT) - FIRST_N + 1);
   const onLineCount = (t) => activeNs(t).filter((n) => t - n * TAKT < T.out[1]).length;
@@ -511,17 +517,22 @@ export function buildLiveWorld() {
     carrier: () => at(carrier.group, 5.2),
     rack: () => V(4, 3.4, -31.5),
   };
+  const carRouteFor = (lt) => {
+    if (lt < 0) return null;
+    if (lt < T.toPaint[1]) return [V(heroX(lt), 0.75, LINE_Z), V(BOOTH_X, 0.75, LINE_Z)];
+    if (lt >= T.out[0] - 0.4 && lt < T.out[1]) {
+      const s = outLen * ss(...T.out, lt);
+      return [outAt(s).p, ...outPts.filter((_, i) => outL[i] > s)].map((p) => p.clone().setY(Math.max(0.06, p.y)));
+    }
+    return null;
+  };
   const routes = {
     car: (t) => {
       const L = leaderAt(t);
-      if (!L) return null;
-      if (L.lt < T.toPaint[1]) return [V(heroX(L.lt), 0.75, LINE_Z), V(BOOTH_X, 0.75, LINE_Z)];
-      if (L.lt >= T.out[0] - 0.4 && L.lt < T.out[1]) {
-        const s = outLen * ss(...T.out, L.lt);
-        return [outAt(s).p, ...outPts.filter((_, i) => outL[i] > s)].map((p) => p.clone().setY(Math.max(0.06, p.y)));
-      }
-      return null;
+      return L ? carRouteFor(L.lt) : null;
     },
+    // the same ground route for ANY spawned car (the interactive live view follows tapped cars)
+    carFor: (n, t) => carRouteFor(t - n * TAKT),
     agv: (t) => {
       const agvCar = stationCar(t, T.agv[0], T.agv[1] + 0.6);
       return agvCar ? agvPath.points(agvPath.L * ss(...T.agv, agvCar.lt), agvPath.L) : null;
@@ -543,6 +554,6 @@ export function buildLiveWorld() {
     root, pose, anchors, routes, bodies,
     objects: {hero: cars[0].body, painter: painters[0].r, wheeler: wheelers[0].r, agv, dyno, carrier, booth},
     heroX,
-    live: {TAKT, FIRST_N, POOL, activeNs, leaderAt, startedCount, shippedCount, onLineCount, poolSize: () => cars.length, visibleCars: () => cars.filter((c) => c.body.group.visible).length},
+    live: {TAKT, FIRST_N, POOL, activeNs, leaderAt, activeCars, stationCar, startedCount, shippedCount, onLineCount, poolSize: () => cars.length, visibleCars: () => cars.filter((c) => c.body.group.visible).length},
   };
 }

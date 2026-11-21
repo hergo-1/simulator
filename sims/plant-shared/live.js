@@ -1,10 +1,17 @@
 // Plantline LIVE: the toy car plant as an ordinary always-running simulator. No film, no loop:
 // the runtime clock is effectively unbounded (24 h), bodies spawn on a 12.5 s takt and each one
 // walks the hero's 50 s stage timeline at its own offset, so the line holds several cars at
-// once. The camera gently follows the most-advanced car (the leader) with smooth blends when
-// the lead passes to the next car — no jump cuts, no return to a start frame. The UI counters
-// (bodies started / cars shipped / on line now) only ever grow. Same models, colours, product
-// UI and toy scale as plant-film; the film entry is untouched.
+// once. The UI counters (bodies started / cars shipped / on line now) only ever grow. Same
+// models, colours, product UI and toy scale as plant-film; the film entry is untouched.
+//
+// INTERACTIVE (v2): the default camera is a wide establishing shot of the WHOLE plant — weld
+// cell C4 at one end, the carrier yard at the other — and it stays there while nothing is
+// selected. Tapping (pointerdown, touch included) raycasts the scene: tap a car and the kit's
+// selection box, ground route and detail card follow THAT car with its live VIN/stage data;
+// tap a station (weld cell, paint booth, assembly, QA dyno, carrier) and its own live card
+// opens while the camera frames the station. Tap empty ground — or the tools column's home
+// button, or the card's close button — and the view glides back to the whole plant. No
+// director, no fake cursor: the selection is the visitor's, not the film's.
 import * as THREE from 'three';
 import {runSim} from '../kit/runtime.js';
 import {TOY, createToyStage} from '../airport-shared/style.js';
@@ -45,25 +52,8 @@ export const UI_WORDS_LIVE = {
   ],
 };
 
-// the film's camera keys, read at the LEADER car's local time (0..45) — the wide home keys at
-// 46+ are never reached, so the live camera stays on the line and never jumps home.
 const AZ = 38;
 const EL = 36;
-const KEYS = [
-  {t: 0, x: -57, z: 1, d: 66},
-  {t: 5.8, x: -56, z: 1, d: 62},
-  {t: 12.6, x: -16, z: 0, d: 66},
-  {t: 19.0, x: -16, z: 0, d: 62},
-  {t: 20.8, x: -16, z: 0, d: 62},
-  {t: 23.2, x: 24, z: -6, d: 78},
-  {t: 28.8, x: 24, z: -6, d: 74},
-  {t: 30.6, x: 36, z: -2, d: 64},
-  {t: 32.8, x: 36, z: -2, d: 62},
-  {t: 35.4, x: 70, z: 0, d: 70},
-  {t: 41.0, x: 72, z: 0, d: 66},
-  {t: 45.0, x: 104, z: 2, d: 84},
-  {t: 46.2, x: 104, z: 2, d: 84},
-];
 
 const SITES = {
   BS: ['C4', 'Body shop · Cell C4', '4 robots · welding'],
@@ -75,6 +65,18 @@ const SITES = {
 };
 const DROP = [['C4', 'Body shop · Cell C4', '4 robots · welding', 92], ['P2', 'Paint · Booth 2', '1 body in booth', 70], ['A2', 'Assembly · Station A2', 'wheels · trim', 64], ['Q1', 'QA · Rolling road', '1 car testing', 40], ['Y', 'Yard · Carrier 24', 'loading', 83]];
 
+// the five tappable stations: the local-time window a car spends in each, the camera frame
+// that holds the station, and the tag the selection pill shows over it.
+const ST_WIN = {BS: [0, 12.6], PT: [12.6, 20.8], AS: [20.8, 35.4], QA: [35.4, 43.6], YD: [T.out[0], 48]};
+const ST_CAM = {
+  BS: {x: -58, z: 0, ty: 1.5, d: 56},
+  PT: {x: -16, z: 0, ty: 1.5, d: 48},
+  AS: {x: 27, z: 0, ty: 1.5, d: 60},
+  QA: {x: 68, z: 0, ty: 1.5, d: 54},
+  YD: {x: 110, z: 0, ty: 2, d: 80},
+};
+const ST_TAG = {BS: 'Cell C4', PT: 'Booth 2', AS: 'Station A2', QA: 'QA 01', YD: 'Carrier 24'};
+
 export function runToyPlantLive() {
   return runSim({duration: 86400, fps: 60, theme: 'light', hud: {enabled: false, title: 'plantline live', subtitle: ''}, director: {enabled: false}, watermark: ''}, async ({canvas, capture}) => {
     const app = document.getElementById('app');
@@ -82,7 +84,8 @@ export function runToyPlantLive() {
     const W = buildLiveWorld();
     st.scene.add(W.root);
     const ui = createToyUI(app, UI_WORDS_LIVE, {});
-    const sel = createSelection(st.scene, st);
+    const marks = createSelection(st.scene, st);
+    const detEl = ui.el.querySelector('.det');
     const fit = () => (app.style.transform = `scale(${Math.min(innerWidth / 1600, innerHeight / 900)})`);
     const resize = () => {
       fit();
@@ -109,35 +112,117 @@ export function runToyPlantLive() {
       weld: thumb(buildToyRobot({tool: 'weld', number: '01'}).group),
     };
 
-    // ---------------------------------------------------------- the camera: follow the leader, blended
-    const P = (o) => o.getWorldPosition(new THREE.Vector3());
-    const keyCam = (t) => {
-      let i = 0;
-      while (i < KEYS.length - 2 && KEYS[i + 1].t <= t) i++;
-      const a = KEYS[i];
-      const b = KEYS[i + 1];
-      const k = ss(a.t, b.t, t);
-      const far = Math.hypot(b.x - a.x, b.z - a.z);
-      const arc = far > 40 ? 0.3 * Math.sin(Math.PI * k) : 0;
-      return {x: lerp(a.x, b.x, k), z: lerp(a.z, b.z, k), d: lerp(a.d, b.d, k) * (1 + arc)};
+    // ---------------------------------------------------------- the wide home camera, fitted to the plant
+    // The whole line in one frame: press/C4 (x -94) to the end of the carrier yard (x 142),
+    // the hall and yard strip in z, the hall roof in y. The distance is solved once, on paper
+    // (a scratch perspective camera, no renders), so every corner of that box lands inside
+    // the 1600x900 frame with a margin under the top bar.
+    const fitCam = new THREE.PerspectiveCamera(28, 1600 / 900, 5, 2000);
+    const projWith = (c, x, y, z) => {
+      const el = EL * D2R;
+      fitCam.position.set(c.x + c.d * Math.cos(el) * Math.sin(c.az), c.ty + c.d * Math.sin(el), c.z + c.d * Math.cos(el) * Math.cos(c.az));
+      fitCam.lookAt(c.x, c.ty, c.z);
+      fitCam.setViewOffset(1600, 900, -(c.sx || 0), -(c.sy || 0), 1600, 900);
+      fitCam.updateMatrixWorld();
+      const v = new THREE.Vector3(x, y, z).project(fitCam);
+      return [(v.x * 0.5 + 0.5) * 1600, (-v.y * 0.5 + 0.5) * 900, v.z];
     };
-    const camDesired = (lt, leader) => {
-      const c = keyCam(Math.min(lt, 45));
-      const w1 = ss(5.8, 7.2, lt) * (1 - ss(11.6, 12.8, lt));
-      const w2 = ss(41.0, 42.2, lt) * (1 - ss(44.6, 45.6, lt));
-      const w = Math.max(w1, w2);
-      if (w > 0 && leader) {
-        const p = P(leader.group);
-        c.x = lerp(c.x, p.x + 2, w);
-        c.z = lerp(c.z, p.z + 2, w);
-        c.d = lerp(c.d, w2 > w1 ? 80 : 70, w);
+    const HOME_BASE = {x: 23, z: 2, ty: 0.8, az: AZ * D2R, sx: 0, sy: 0};
+    const PLANT_CORNERS = [];
+    for (const x of [-94, 142]) for (const z of [-40, 44]) for (const y of [0, 16]) PLANT_CORNERS.push([x, y, z]);
+    const fitsAt = (d) =>
+      PLANT_CORNERS.every(([x, y, z]) => {
+        const [px, py, pz] = projWith({...HOME_BASE, d}, x, y, z);
+        return pz < 1 && px > 24 && px < 1576 && py > 82 && py < 884;
+      });
+    let homeD = 120;
+    while (homeD < 640 && !fitsAt(homeD)) homeD *= 1.06;
+    const HOME = {...HOME_BASE, d: homeD};
+
+    // ---------------------------------------------------------- tap-to-follow picking
+    // Every tappable thing registers its root group; a pointerdown raycasts those roots and
+    // the first visible hit wins. Cars register by pool slot (the spawn using the slot is
+    // resolved at tap time); station equipment registers by station id.
+    const bodyByName = Object.fromEntries(W.bodies.map((b) => [b.name, b.g]));
+    const pickRoots = [];
+    const regPick = (obj, ent) => {
+      if (!obj) return;
+      obj.userData.__pick = ent;
+      pickRoots.push(obj);
+    };
+    for (let i = 0; i < W.live.poolSize(); i++) {
+      regPick(bodyByName[`car${i}`], {kind: 'car', slot: i});
+      regPick(bodyByName[`skid${i}`], {kind: 'car', slot: i});
+    }
+    for (const [name, id] of [
+      ['weld0', 'BS'], ['weld1', 'BS'], ['weld2', 'BS'], ['weld3', 'BS'], ['press', 'BS'],
+      ['paint0', 'PT'], ['paint1', 'PT'],
+      ['wheel0', 'AS'], ['wheel1', 'AS'], ['grip', 'AS'], ['agv', 'AS'], ['agvLoop0', 'AS'], ['agvLoop1', 'AS'],
+      ['dyno', 'QA'], ['lift', 'QA'],
+      ['carrier', 'YD'],
+    ]) regPick(bodyByName[name], {kind: 'station', id});
+    regPick(W.objects.booth.group, {kind: 'station', id: 'PT'});
+
+    let sel = null; // {kind:'car', n} | {kind:'station', id} | null (null = the whole plant)
+    let curT = 0;
+    const ray = new THREE.Raycaster();
+    const pickAt = (clientX, clientY) => {
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      const px = ((clientX - rect.left) / rect.width) * 1600;
+      const py = ((clientY - rect.top) / rect.height) * 900;
+      ray.setFromCamera(new THREE.Vector2((px / 1600) * 2 - 1, -(py / 900) * 2 + 1), st.camera);
+      for (const h of ray.intersectObjects(pickRoots, true)) {
+        let o = h.object;
+        let rootO = null;
+        let hidden = false;
+        while (o) {
+          if (o.visible === false) {
+            hidden = true;
+            break;
+          }
+          if (o.userData.__pick) {
+            rootO = o;
+            break;
+          }
+          o = o.parent;
+        }
+        if (hidden || !rootO) continue;
+        const ent = rootO.userData.__pick;
+        if (ent.kind === 'car') {
+          const c = W.live.activeCars(curT).find((cc) => cc.slot === ent.slot);
+          if (c && c.lt < T.out[1]) return {kind: 'car', n: c.n};
+          continue; // a pooled body that is not on the line right now — look further down the hits
+        }
+        return {kind: 'station', id: ent.id};
       }
-      return c;
+      return null;
     };
+    canvas.style.touchAction = 'none';
+    canvas.addEventListener('pointerdown', (e) => {
+      sel = pickAt(e.clientX, e.clientY);
+    });
+    // the kit's own home glyph (tools column) and the detail card's close button become real:
+    // the overlay is pointer-events:none, so just these two controls opt back in.
+    const wireDeselect = (el2, label) => {
+      if (!el2) return;
+      el2.style.pointerEvents = 'auto';
+      el2.style.cursor = 'pointer';
+      el2.title = label;
+      el2.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        sel = null;
+      });
+    };
+    wireDeselect(ui.el.querySelector('[data-k="tool6"]'), 'Whole plant');
+    wireDeselect(ui.el.querySelectorAll('.det .btns b')[2], 'Close');
+    if (detEl) detEl.style.visibility = 'hidden';
+
+    // ---------------------------------------------------------- camera state
     let cam = null;
     let lastT = null;
 
-    // ---------------------------------------------------------- what the page shows (per leader local time)
+    // ---------------------------------------------------------- what the page shows (per car local time)
     const siteAt = (t) => (t < 12.6 ? 'BS' : t < 20.8 ? 'PT' : t < 35.4 ? 'AS' : t < 43.6 ? 'QA' : 'YD');
     const wheelsOn = (t) => (t >= T.fitFL) + (t >= T.fitFR) + (t >= T.fitRL) + (t >= T.fitRR);
     const stageOf = (t) =>
@@ -155,6 +240,30 @@ export function runToyPlantLive() {
       const pc = (a, b) => clamp((lt - a) / (b - a));
       const [s, txt, cls] = stageOf(lt);
       return {pop: 1, thumb: TH.car, org: 'LINE 1 · NORTHBAY', title: vin, sub: 'Model E · Ocean Blue', stat: s, statCls: cls, statText: txt, prog: progress(lt), progText: `${Math.round(100 * progress(lt))}%`, rows: [['Welds', `${fmt(4312 * pc(...T.weld))} / 4,312`], ['Paint', lt < T.paint[0] ? 'E-coat' : lt < T.paint[1] ? `${Math.round(100 * pc(...T.paint))}%` : 'Ocean Blue'], ['Wheels', `${wheelsOn(lt)} / 4`], ['Battery', '62%'], ['Order', 'Dealer · Oslo', 1], ['Ship', lt < T.out[1] ? 'Carrier 24 · next slot' : 'Aboard · shipped']]};
+    };
+    // a station's own card, all of it read from the live world at time t: the car in the
+    // station right now, what the equipment is doing to it, and the plant's running counts.
+    const stationCard = (id, t) => {
+      const sc = W.live.stationCar(t, ...ST_WIN[id]);
+      const lt = sc ? sc.lt : 0;
+      const vin = sc ? (W.live.activeCars(t).find((c) => c.n === sc.n)?.vin ?? '—') : '—';
+      const pc = (a, b) => clamp((lt - a) / (b - a));
+      if (id === 'BS') {
+        const welding = !!sc && lt > T.weld[0] && lt < T.weld[1];
+        return {pop: 1, thumb: TH.weld, org: 'BODY SHOP · LINE 1', title: 'Cell C4', sub: 'Body framing · 4 robots', stat: welding ? 'Welding' : sc ? 'In cell' : 'Idle', statCls: welding ? 'go' : sc ? 'in' : 'wait', statText: sc ? `${vin} · body in cell` : 'waiting for the next body', prog: sc ? clamp(lt / ST_WIN.BS[1]) : 0, progText: sc ? `${Math.round(100 * clamp(lt / ST_WIN.BS[1]))}%` : '0%', rows: [['Body', vin], ['Welds', sc ? `${fmt(4312 * pc(...T.weld))} / 4,312` : '—'], ['Robots', 'R-01 – R-04 · welding'], ['Next body', `${(W.live.TAKT - (t % W.live.TAKT)).toFixed(1)} s`]]};
+      }
+      if (id === 'PT') {
+        const spraying = !!sc && lt > T.spray[0] && lt < T.spray[1];
+        return {pop: 1, thumb: TH.paint, org: 'PAINT · LINE 1', title: 'Booth 2', sub: 'Ocean Blue · 3-coat', stat: spraying ? 'Spraying' : sc ? 'In booth' : 'Standby', statCls: spraying ? 'go' : sc ? 'in' : 'wait', statText: sc ? `${vin} · in booth 2` : 'no body in the booth', prog: sc ? clamp((lt - ST_WIN.PT[0]) / (ST_WIN.PT[1] - ST_WIN.PT[0])) : 0, progText: sc ? `${Math.round(100 * clamp((lt - ST_WIN.PT[0]) / (ST_WIN.PT[1] - ST_WIN.PT[0])))}%` : '0%', rows: [['Body', vin], ['Paint', sc ? `${Math.round(100 * pc(...T.paint))}% · Ocean Blue` : '—'], ['Doors', sc ? (lt < T.boothShut[1] || lt > T.boothOut[0] ? 'Open' : 'Closed') : 'Closed'], ['Robots', 'R-07 · R-08 · spray']]};
+      }
+      if (id === 'AS') {
+        return {pop: 1, thumb: TH.wheel, org: 'ASSEMBLY · LINE 1', title: 'Station A2', sub: 'Wheels · seats · glass', stat: sc ? (lt < T.toTrim[0] ? 'Fitting wheels' : 'Trim') : 'Idle', statCls: sc ? 'go' : 'wait', statText: sc ? `${vin} · at station A2` : 'no car at the station', prog: sc ? clamp((lt - ST_WIN.AS[0]) / (ST_WIN.AS[1] - ST_WIN.AS[0])) : 0, progText: sc ? `${Math.round(100 * clamp((lt - ST_WIN.AS[0]) / (ST_WIN.AS[1] - ST_WIN.AS[0])))}%` : '0%', rows: [['Car', vin], ['Wheels', sc ? `${wheelsOn(lt)} / 4` : '—'], ['AGV-12', sc && lt > T.agv[0] ? (lt < T.agv[1] ? 'Delivering seats' : 'Docked at A2') : 'Standing by'], ['Trim', sc && lt > T.toTrim[0] ? 'Seats · glass' : '—']]};
+      }
+      if (id === 'QA') {
+        const testing = !!sc && lt > T.test[0] && lt < T.test[1];
+        return {pop: 1, thumb: TH.dyno, org: 'QA · LINE 1', title: 'Rolling road', sub: 'QA 01 · dyno test', stat: testing ? 'Testing' : sc && lt >= T.test[1] ? 'Passed' : sc ? 'To QA' : 'Idle', statCls: testing ? 'in' : sc && lt >= T.test[1] ? 'go' : sc ? 'in' : 'wait', statText: sc ? `${vin} · on the rolling road` : 'no car on the dyno', prog: sc ? clamp((lt - ST_WIN.QA[0]) / (ST_WIN.QA[1] - ST_WIN.QA[0])) : 0, progText: sc ? `${Math.round(100 * clamp((lt - ST_WIN.QA[0]) / (ST_WIN.QA[1] - ST_WIN.QA[0])))}%` : '0%', rows: [['Car', vin], ['Rolling road', sc ? `${Math.round(100 * pc(...T.test))}%` : '—'], ['Result', sc ? (lt >= T.test[1] ? 'Passed' : 'Running') : '—'], ['Dyno', 'QA 01']]};
+      }
+      return {pop: 1, thumb: TH.carrier, org: 'YARD · LINE 1', title: 'Carrier 24', sub: 'Car carrier · loading', stat: sc ? 'Loading' : 'Waiting', statCls: sc ? 'in' : 'wait', statText: sc ? `${vin} · driving aboard` : 'waiting for the next car', prog: sc ? clamp((lt - ST_WIN.YD[0]) / (ST_WIN.YD[1] - ST_WIN.YD[0])) : 0, progText: sc ? `${Math.round(100 * clamp((lt - ST_WIN.YD[0]) / (ST_WIN.YD[1] - ST_WIN.YD[0])))}%` : '0%', rows: [['Loading', vin], ['Cars shipped', fmt(W.live.shippedCount(t))], ['Carrier', '24 · Aurora'], ['Ramp', sc ? 'Down · loading' : 'Folded']]};
     };
     const trackFor = (lt, vin) => {
       const st2 = (a, b) => (lt < a ? '' : lt < b ? 'on' : 'done');
@@ -193,56 +302,112 @@ export function runToyPlantLive() {
       ]};
     };
     const underUI = ([x, y]) => (x > 1130 && y < 450) || (x > 1080 && y > 620) || (x < 1000 && y > 720) || (x < 780 && y < 185);
+    const P = (o) => o.getWorldPosition(new THREE.Vector3());
+    const ST_BOX = {BS: bodyByName.weld0, PT: W.objects.booth.group, AS: bodyByName.wheel0, QA: W.objects.dyno.group, YD: W.objects.carrier.group};
+    const stationAnchor = (id) => {
+      if (id === 'PT') return W.anchors.booth();
+      if (id === 'QA') return W.anchors.dyno();
+      if (id === 'YD') return W.anchors.carrier();
+      if (id === 'AS') return W.anchors.wheeler();
+      return P(bodyByName.weld0).add(new THREE.Vector3(0, 5, 0));
+    };
 
-    window.TOYPLANTLIVE = {st, W};
+    window.TOYPLANTLIVE = {st, W, home: HOME, sel: () => sel, pickAt};
     return {
       resize,
       render(t) {
+        curT = t;
         W.pose(t);
         const L = W.live.leaderAt(t);
         const lt = L ? L.lt : 0;
         const vin = L ? L.vin : '—';
-        sel.box(L ? L.group : null, 1);
-        sel.route(L ? W.routes.car(t) : null, 1, 1);
-        sel.update();
-        // smooth-follow camera: exponential blend toward the leader's desired frame;
-        // a big time step (seek/capture) snaps instead of gliding.
-        const desired = camDesired(lt, L);
-        if (!cam || lastT === null || t < lastT || t - lastT > 1.5) cam = desired;
+        // resolve the tap selection against the live line: a followed car is released
+        // the moment it is aboard the carrier (counted shipped), back to the whole plant.
+        let selCar = null;
+        if (sel && sel.kind === 'car') {
+          selCar = W.live.activeCars(t).find((c) => c.n === sel.n) ?? null;
+          if (!selCar || selCar.lt >= T.out[1]) {
+            sel = null;
+            selCar = null;
+          }
+        }
+        const selStation = sel && sel.kind === 'station' ? sel.id : null;
+        marks.box(selCar ? selCar.group : selStation ? ST_BOX[selStation] : null, 1);
+        marks.route(selCar ? W.routes.carFor(selCar.n, t) : null, 1, 1);
+        marks.update();
+        // the camera: wide on the whole plant by default (a breath of drift, nothing more);
+        // on a selection it glides to the car and tracks it, or frames the station.
+        let desired;
+        if (selCar) {
+          const p = selCar.group.position;
+          desired = {x: p.x, z: p.z, ty: p.y + 0.9, d: 34, az: AZ * D2R, sx: -110, sy: 26};
+        } else if (selStation) {
+          desired = {...ST_CAM[selStation], az: AZ * D2R, sx: -110, sy: 26};
+        } else {
+          desired = {x: HOME.x, z: HOME.z, ty: HOME.ty, d: HOME.d, az: AZ * D2R + Math.sin(t * 0.025) * 0.02, sx: 0, sy: 0};
+        }
+        const dt = lastT === null ? 0 : t - lastT;
+        if (!cam || lastT === null || t < lastT || dt > 1.5) cam = desired;
         else {
-          const k = 1 - Math.exp(-(t - lastT) / 1.1);
-          cam = {x: lerp(cam.x, desired.x, k), z: lerp(cam.z, desired.z, k), d: lerp(cam.d, desired.d, k)};
+          const k = 1 - Math.exp(-dt / 1.1);
+          for (const f of ['x', 'z', 'ty', 'd', 'az', 'sx', 'sy']) cam[f] = lerp(cam[f], desired[f], k);
         }
         lastT = t;
-        st.frame({tx: cam.x, ty: 1.5, tz: cam.z, az: AZ * D2R, el: EL * D2R, d: cam.d, fov: 28, sx: -110, sy: 26});
+        st.frame({tx: cam.x, ty: cam.ty, tz: cam.z, az: cam.az, el: EL * D2R, d: cam.d, fov: 28, sx: cam.sx, sy: cam.sy});
         const tags = [];
-        if (L) {
-          const a = st.project(W.anchors.car());
-          const [txt] = stageOf(lt);
-          if (a && !underUI(a)) tags.push({kind: 'sel', x: a[0], y: a[1], text: vin, sub: txt, a: 1});
+        if (selCar) {
+          const a = st.project(selCar.group.position.clone().add(new THREE.Vector3(0, 2.4, 0)));
+          const [txt] = stageOf(selCar.lt);
+          if (a && !underUI(a)) tags.push({kind: 'sel', x: a[0], y: a[1], text: selCar.vin, sub: txt, a: 1});
+        } else if (selStation) {
+          const a = st.project(stationAnchor(selStation));
+          if (a && !underUI(a)) tags.push({kind: 'sel', x: a[0], y: a[1], text: ST_TAG[selStation], sub: stationCard(selStation, t).stat, a: 1});
         }
         const started = W.live.startedCount(t);
         const shipped = W.live.shippedCount(t);
         const onLine = W.live.onLineCount(t);
+        let card;
+        let track;
+        let table;
+        let site;
+        if (selCar) {
+          card = carCard(selCar.lt, selCar.vin);
+          track = trackFor(selCar.lt, selCar.vin);
+          table = tableFor(siteAt(selCar.lt), selCar.lt);
+          site = SITES[siteAt(selCar.lt)];
+        } else if (selStation) {
+          card = stationCard(selStation, t);
+          const sc = W.live.stationCar(t, ...ST_WIN[selStation]);
+          const scCar = sc ? W.live.activeCars(t).find((c) => c.n === sc.n) : null;
+          track = scCar ? trackFor(scCar.lt, scCar.vin) : trackFor(lt, vin);
+          table = tableFor(selStation, sc ? sc.lt : lt);
+          site = SITES[selStation];
+        } else {
+          card = {...carCard(lt, vin), pop: 0};
+          track = trackFor(lt, vin);
+          table = tableFor(siteAt(lt), lt);
+          site = SITES.PL;
+        }
+        if (detEl) detEl.style.visibility = sel ? 'visible' : 'hidden';
         ui.update({
           clock: fmtClock(t),
-          site: SITES[siteAt(lt)],
+          site,
           kpi: {
             a: [fmt(started), 'takt 12.5 s', 'bodies started · line 1'],
             b: [fmt(shipped), 'carrier 24', 'cars shipped · line 1'],
             c: [fmt(onLine), 'live', 'cars on line · now'],
           },
-          card: carCard(lt, vin),
-          track: trackFor(lt, vin),
-          table: tableFor(siteAt(lt), lt),
+          card,
+          track,
+          table,
           drop: {open: 0, sites: DROP, on: 1},
-          tool: -1,
+          tool: sel ? -1 : 6,
           tags,
           cursor: [-100, -100],
           hand: false,
           click: 0,
         });
-        window.__LIVE_STATE = {t, started, shipped, onLine, pool: W.live.poolSize(), visibleCars: W.live.visibleCars(), leaderLt: lt, leaderVin: vin};
+        window.__LIVE_STATE = {t, started, shipped, onLine, pool: W.live.poolSize(), visibleCars: W.live.visibleCars(), leaderLt: lt, leaderVin: vin, sel: sel ? {...sel} : null, selVin: selCar ? selCar.vin : null, selLt: selCar ? selCar.lt : null, cam: {x: cam.x, z: cam.z, d: cam.d}};
         return {};
       },
     };
