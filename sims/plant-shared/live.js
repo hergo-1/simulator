@@ -12,6 +12,17 @@
 // opens while the camera frames the station. Tap empty ground — or the tools column's home
 // button, or the card's close button — and the view glides back to the whole plant. No
 // director, no fake cursor: the selection is the visitor's, not the film's.
+//
+// FREE NAVIGATION (v3): the camera is the visitor's to move, not just to aim. Dragging
+// pans across the plant (grab-the-world), a two-finger pinch or the mouse wheel dollies
+// in and out around the ground point under the gesture, and either one lets go of a
+// follow and lands in FREE framing; a double-tap on empty ground glides back HOME. The
+// follow camera itself was reworked after it read as jerky on a real phone: it now aims
+// at the car's velocity-led position instead of chasing its raw position, damps its
+// height on a slower constant than its ground track, and never teleports after a long
+// frame. The HUD text path is throttled too — full card/KPI/table writes happen on a
+// 200 ms cadence or on a structural change, never per frame; only the selection pill's
+// position and the detail bar's width still ride at frame rate (style writes, no text).
 import * as THREE from 'three';
 import {runSim} from '../kit/runtime.js';
 import {TOY, createToyStage} from '../airport-shared/style.js';
@@ -199,9 +210,182 @@ export function runToyPlantLive() {
       return null;
     };
     canvas.style.touchAction = 'none';
+
+    // ---------------------------------------------------------- free navigation (v3)
+    // FREE framing state: the visitor's own target + distance, used whenever nothing is
+    // selected and the home view has been left. Gestures write these; render() damps the
+    // camera onto them. Entering FREE (drag / pinch / wheel) releases any follow, and
+    // the state is seeded from the camera's current pose so nothing jumps.
+    const D_MIN = 22;
+    const PAN_BOX = {x0: -130, x1: 178, z0: -72, z1: 80}; // plant box (-94..142, -40..44) + margin
+    let freeMode = false;
+    const freeTarget = {x: HOME.x, z: HOME.z};
+    let freeD = HOME.d;
+    const goHome = () => {
+      sel = null;
+      freeMode = false;
+    };
+    const enterFree = () => {
+      if (freeMode) return;
+      freeMode = true;
+      sel = null;
+      if (cam) {
+        freeTarget.x = cam.x;
+        freeTarget.z = cam.z;
+        freeD = cam.d;
+      } else {
+        freeTarget.x = HOME.x;
+        freeTarget.z = HOME.z;
+        freeD = HOME.d;
+      }
+    };
+    const clampFree = () => {
+      freeTarget.x = Math.min(PAN_BOX.x1, Math.max(PAN_BOX.x0, freeTarget.x));
+      freeTarget.z = Math.min(PAN_BOX.z1, Math.max(PAN_BOX.z0, freeTarget.z));
+    };
+    // The ground point under a client position for an arbitrary camera state, via a
+    // scratch camera built exactly like the stage's frame(). The offset of that point
+    // from the state's target does not depend on the target — the fact the grab-pan and
+    // zoom-centre maths below are built on.
+    const scratchCam = new THREE.PerspectiveCamera(28, 1600 / 900, 5, 2000);
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const groundAt = (clientX, clientY, s) => {
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      const px = ((clientX - rect.left) / rect.width) * 1600;
+      const py = ((clientY - rect.top) / rect.height) * 900;
+      const el = EL * D2R;
+      const az = AZ * D2R;
+      scratchCam.position.set(s.x + s.d * Math.cos(el) * Math.sin(az), s.ty + s.d * Math.sin(el), s.z + s.d * Math.cos(el) * Math.cos(az));
+      scratchCam.lookAt(s.x, s.ty, s.z);
+      scratchCam.setViewOffset(1600, 900, -(s.sx || 0), -(s.sy || 0), 1600, 900);
+      scratchCam.updateMatrixWorld();
+      ray.setFromCamera(new THREE.Vector2((px / 1600) * 2 - 1, -(py / 900) * 2 + 1), scratchCam);
+      const out = new THREE.Vector3();
+      return ray.ray.intersectPlane(groundPlane, out) ? out : null;
+    };
+    const freeState = () => ({x: freeTarget.x, ty: 1, z: freeTarget.z, d: freeD, sx: 0, sy: 0});
+    const gOf = (cx, cy) => groundAt(cx, cy, {...freeState(), x: 0, z: 0});
+    // change the free distance while the ground point under (cx, cy) stays put
+    const zoomAround = (cx, cy, nd) => {
+      const before = groundAt(cx, cy, freeState());
+      freeD = clamp(nd, D_MIN, HOME.d);
+      if (before) {
+        const after = groundAt(cx, cy, freeState());
+        if (after) {
+          freeTarget.x += before.x - after.x;
+          freeTarget.z += before.z - after.z;
+          clampFree();
+        }
+      }
+    };
+
+    // A short tap selects/deselects, exactly the v2 semantics; in FREE (a state v2 did
+    // not have) a single empty tap is inert and a double-tap on empty ground goes HOME.
+    let lastEmptyTap = -1e9;
+    const handleTap = (cx, cy) => {
+      const hit = pickAt(cx, cy);
+      if (hit) {
+        sel = hit;
+        freeMode = false;
+        lastEmptyTap = -1e9;
+        return;
+      }
+      if (sel) {
+        goHome();
+        lastEmptyTap = -1e9;
+        return;
+      }
+      if (freeMode) {
+        const now = performance.now();
+        if (now - lastEmptyTap < 350) {
+          goHome();
+          lastEmptyTap = -1e9;
+        } else lastEmptyTap = now;
+      }
+    };
+
+    const pointers = new Map(); // pointerId -> {x, y}
+    let gesture = null;
     canvas.addEventListener('pointerdown', (e) => {
-      sel = pickAt(e.clientX, e.clientY);
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {}
+      pointers.set(e.pointerId, {x: e.clientX, y: e.clientY});
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        enterFree();
+        gesture = {pinching: true, moved: true, pinchD0: freeD, pinchDist0: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), lastMx: (a.x + b.x) / 2, lastMy: (a.y + b.y) / 2};
+      } else if (pointers.size === 1) {
+        gesture = {pinching: false, moved: false, reGrab: false, panW: null, downX: e.clientX, downY: e.clientY, downT: performance.now()};
+      }
     });
+    canvas.addEventListener('pointermove', (e) => {
+      const p = pointers.get(e.pointerId);
+      if (!p || !gesture) return;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      if (gesture.pinching) {
+        if (pointers.size !== 2) return;
+        const [a, b] = [...pointers.values()];
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const gPrev = gOf(gesture.lastMx, gesture.lastMy);
+        const gNow = gOf(mx, my);
+        if (gPrev && gNow) {
+          freeTarget.x += gPrev.x - gNow.x;
+          freeTarget.z += gPrev.z - gNow.z;
+          clampFree();
+        }
+        gesture.lastMx = mx;
+        gesture.lastMy = my;
+        const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        zoomAround(mx, my, gesture.pinchD0 * (gesture.pinchDist0 / dist));
+        return;
+      }
+      // one pointer: a drag starts past a 6 px threshold (or at once for the finger
+      // left behind by a pinch, whose anchor was reset when the other finger lifted)
+      if (!gesture.panW && (gesture.reGrab || Math.hypot(e.clientX - gesture.downX, e.clientY - gesture.downY) > 6)) {
+        enterFree();
+        const g0 = gOf(gesture.downX, gesture.downY);
+        gesture.panW = g0 ? {x: freeTarget.x + g0.x, z: freeTarget.z + g0.z} : {x: freeTarget.x, z: freeTarget.z};
+        gesture.moved = true;
+      }
+      if (gesture.panW) {
+        const g = gOf(e.clientX, e.clientY);
+        if (g) {
+          freeTarget.x = gesture.panW.x - g.x;
+          freeTarget.z = gesture.panW.z - g.z;
+          clampFree();
+        }
+      }
+    });
+    const endPointer = (e) => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.delete(e.pointerId);
+      if (!gesture) return;
+      if (gesture.pinching) {
+        if (pointers.size === 1) {
+          const [r] = [...pointers.values()];
+          gesture = {pinching: false, moved: true, reGrab: true, panW: null, downX: r.x, downY: r.y, downT: performance.now()};
+        } else if (pointers.size === 0) gesture = null;
+        return;
+      }
+      const g = gesture;
+      if (pointers.size === 0) gesture = null;
+      if (!g.moved && performance.now() - g.downT < 600) handleTap(e.clientX, e.clientY);
+    };
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', endPointer);
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        enterFree();
+        zoomAround(e.clientX, e.clientY, freeD * Math.exp(e.deltaY * 0.0011));
+      },
+      {passive: false},
+    );
     // the kit's own home glyph (tools column) and the detail card's close button become real:
     // the overlay is pointer-events:none, so just these two controls opt back in.
     const wireDeselect = (el2, label) => {
@@ -211,7 +395,7 @@ export function runToyPlantLive() {
       el2.title = label;
       el2.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
-        sel = null;
+        goHome();
       });
     };
     wireDeselect(ui.el.querySelector('[data-k="tool6"]'), 'Whole plant');
@@ -221,6 +405,12 @@ export function runToyPlantLive() {
     // ---------------------------------------------------------- camera state
     let cam = null;
     let lastT = null;
+    // the followed car's low-passed velocity (for the look-ahead in render)
+    const fol = {n: null, x: 0, z: 0, vx: 0, vz: 0};
+    // HUD write throttle: full ui.update on structural change or a 200 ms cadence
+    let hudSig = null;
+    let hudLast = -Infinity;
+    const barEl = ui.el.querySelector('[data-k="dBar"]');
 
     // ---------------------------------------------------------- what the page shows (per car local time)
     const siteAt = (t) => (t < 12.6 ? 'BS' : t < 20.8 ? 'PT' : t < 35.4 ? 'AS' : t < 43.6 ? 'QA' : 'YD');
@@ -312,7 +502,7 @@ export function runToyPlantLive() {
       return P(bodyByName.weld0).add(new THREE.Vector3(0, 5, 0));
     };
 
-    window.TOYPLANTLIVE = {st, W, home: HOME, sel: () => sel, pickAt};
+    window.TOYPLANTLIVE = {st, W, home: HOME, sel: () => sel, pickAt, nav: () => ({freeMode, fx: freeTarget.x, fz: freeTarget.z, fd: freeD})};
     return {
       resize,
       render(t) {
@@ -336,21 +526,65 @@ export function runToyPlantLive() {
         marks.route(selCar ? W.routes.carFor(selCar.n, t) : null, 1, 1);
         marks.update();
         // the camera: wide on the whole plant by default (a breath of drift, nothing more);
-        // on a selection it glides to the car and tracks it, or frames the station.
+        // on a selection it glides to the car and tracks it, or frames the station; in
+        // FREE it rides the visitor's own target + distance.
+        const dt = lastT === null ? 0 : t - lastT;
         let desired;
+        let mode;
         if (selCar) {
+          mode = 'follow';
           const p = selCar.group.position;
-          desired = {x: p.x, z: p.z, ty: p.y + 0.9, d: 34, az: AZ * D2R, sx: -110, sy: 26};
+          // aim where the car is heading, not where it is: the low-passed velocity leads
+          // the target by roughly the ground-track time constant, which cancels the
+          // chase lag at line speed — and as the car slows into a station the lead
+          // decays with the velocity, so the camera settles onto the car instead of
+          // gliding past it and coming back.
+          if (fol.n === selCar.n && dt > 0.001 && dt < 1) {
+            const kv = 1 - Math.exp(-dt / 0.35);
+            fol.vx += ((p.x - fol.x) / dt - fol.vx) * kv;
+            fol.vz += ((p.z - fol.z) / dt - fol.vz) * kv;
+          } else if (fol.n !== selCar.n) {
+            fol.vx = 0;
+            fol.vz = 0;
+          }
+          fol.n = selCar.n;
+          fol.x = p.x;
+          fol.z = p.z;
+          let lx = fol.vx * 0.55;
+          let lz = fol.vz * 0.55;
+          const ll = Math.hypot(lx, lz);
+          if (ll > 6) {
+            lx *= 6 / ll;
+            lz *= 6 / ll;
+          }
+          desired = {x: p.x + lx, z: p.z + lz, ty: p.y + 0.9, d: 34, az: AZ * D2R, sx: -110, sy: 26};
         } else if (selStation) {
+          mode = 'station';
           desired = {...ST_CAM[selStation], az: AZ * D2R, sx: -110, sy: 26};
+        } else if (freeMode) {
+          mode = 'free';
+          desired = {x: freeTarget.x, z: freeTarget.z, ty: 1, d: freeD, az: AZ * D2R, sx: 0, sy: 0};
         } else {
+          mode = 'home';
           desired = {x: HOME.x, z: HOME.z, ty: HOME.ty, d: HOME.d, az: AZ * D2R + Math.sin(t * 0.025) * 0.02, sx: 0, sy: 0};
         }
-        const dt = lastT === null ? 0 : t - lastT;
-        if (!cam || lastT === null || t < lastT || dt > 1.5) cam = desired;
+        if (!selCar) fol.n = null;
+        if (!cam || lastT === null || t < lastT) cam = desired;
         else {
-          const k = 1 - Math.exp(-dt / 1.1);
-          for (const f of ['x', 'z', 'ty', 'd', 'az', 'sx', 'sy']) cam[f] = lerp(cam[f], desired[f], k);
+          // per-field time constants, and the damping step is clamped: a long frame (a
+          // hitch, a backgrounded tab) must never teleport the camera — v2 snapped
+          // cam = desired whenever dt > 1.5 s, which on a struggling renderer is
+          // exactly when the follow jumped. The height damps slowest of all: the car's
+          // y is piecewise (lift, dyno, ramp), and feeding it straight into lookAt
+          // stepped the aim vertically.
+          const dd = Math.min(Math.max(dt, 0), 0.25);
+          const TAU =
+            mode === 'free'
+              ? {x: 0.12, z: 0.12, ty: 0.12, d: 0.15, az: 0.15, sx: 0.15, sy: 0.15}
+              : mode === 'follow'
+                ? {x: 0.6, z: 0.6, ty: 0.9, d: 0.8, az: 0.6, sx: 0.6, sy: 0.6}
+                : {x: 1.1, z: 1.1, ty: 1.1, d: 1.1, az: 1.1, sx: 1.1, sy: 1.1};
+          for (const f of ['x', 'z', 'ty', 'd', 'az', 'sx', 'sy']) cam[f] = lerp(cam[f], desired[f], 1 - Math.exp(-dd / TAU[f]));
         }
         lastT = t;
         st.frame({tx: cam.x, ty: cam.ty, tz: cam.z, az: cam.az, el: EL * D2R, d: cam.d, fov: 28, sx: cam.sx, sy: cam.sy});
@@ -388,26 +622,51 @@ export function runToyPlantLive() {
           table = tableFor(siteAt(lt), lt);
           site = SITES.PL;
         }
-        if (detEl) detEl.style.visibility = sel ? 'visible' : 'hidden';
-        ui.update({
-          clock: fmtClock(t),
-          site,
-          kpi: {
-            a: [fmt(started), 'takt 12.5 s', 'bodies started · line 1'],
-            b: [fmt(shipped), 'carrier 24', 'cars shipped · line 1'],
-            c: [fmt(onLine), 'live', 'cars on line · now'],
-          },
-          card,
-          track,
-          table,
-          drop: {open: 0, sites: DROP, on: 1},
-          tool: sel ? -1 : 6,
-          tags,
-          cursor: [-100, -100],
-          hand: false,
-          click: 0,
-        });
-        window.__LIVE_STATE = {t, started, shipped, onLine, pool: W.live.poolSize(), visibleCars: W.live.visibleCars(), leaderLt: lt, leaderVin: vin, sel: sel ? {...sel} : null, selVin: selCar ? selCar.vin : null, selLt: selCar ? selCar.lt : null, cam: {x: cam.x, z: cam.z, d: cam.d}};
+        if (detEl) {
+          const vis = sel ? 'visible' : 'hidden';
+          if (detEl.style.visibility !== vis) detEl.style.visibility = vis;
+        }
+        // Full HUD writes are the expensive part of a frame (the kit rebuilds the
+        // tracker steps, the detail rows and the fleet table as innerHTML whenever a
+        // displayed number moves). They now happen on a structural change — selection,
+        // card subject or state, site, counts — or on a 200 ms cadence for the
+        // fast-moving fields, and the first frame always sends, so the KPIs and the
+        // clock are populated from the first second. Between sends, only two style
+        // writes ride at frame rate: the selection pill's position and the detail
+        // card's progress-bar width. The counts themselves are computed from t at
+        // send time, so they stay exact.
+        const sig = [selCar ? `c${selCar.n}` : (selStation ?? '-'), card.title, card.stat, site[0], started, shipped, onLine, track.steps.map((s2) => s2[3]).join(''), table.site].join('|');
+        if (sig !== hudSig || t - hudLast >= 0.2) {
+          hudSig = sig;
+          hudLast = t;
+          ui.update({
+            clock: fmtClock(t),
+            site,
+            kpi: {
+              a: [fmt(started), 'takt 12.5 s', 'bodies started · line 1'],
+              b: [fmt(shipped), 'carrier 24', 'cars shipped · line 1'],
+              c: [fmt(onLine), 'live', 'cars on line · now'],
+            },
+            card,
+            track,
+            table,
+            drop: {open: 0, sites: DROP, on: 1},
+            tool: sel ? -1 : 6,
+            tags,
+            cursor: [-100, -100],
+            hand: false,
+            click: 0,
+          });
+        }
+        if (tags.length) {
+          const node = ui.el.querySelector('.tags')?.children[0];
+          if (node && node.style.display !== 'none') {
+            node.style.left = `${tags[0].x.toFixed(1)}px`;
+            node.style.top = `${tags[0].y.toFixed(1)}px`;
+          }
+        }
+        if (sel && barEl) barEl.style.width = `${(100 * card.prog).toFixed(1)}%`;
+        window.__LIVE_STATE = {t, started, shipped, onLine, pool: W.live.poolSize(), visibleCars: W.live.visibleCars(), leaderLt: lt, leaderVin: vin, sel: sel ? {...sel} : null, selVin: selCar ? selCar.vin : null, selLt: selCar ? selCar.lt : null, cam: {x: cam.x, z: cam.z, d: cam.d}, nav: {mode, freeMode, fd: freeD, fx: freeTarget.x, fz: freeTarget.z}};
         return {};
       },
     };
